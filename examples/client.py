@@ -12,7 +12,7 @@ with ExitStack() as stack:
     files = [("documents", (Path(name).name, stack.enter_context(open(name, "rb")))) for name in sys.argv[1:]]
     examples = Path(__file__).parent
     response = httpx.post(
-        os.getenv("OCR_URL", "http://127.0.0.1:8090") + "/v1/extract",
+        os.getenv("OCR_URL", "http://127.0.0.1:8081") + "/v1/extract",
         headers={"Authorization": "Bearer " + os.environ["OCR_API_KEY"]},
         files=files,
         data={"instructions": (examples / "transactions.instructions.txt").read_text(),

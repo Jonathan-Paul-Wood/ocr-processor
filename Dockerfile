@@ -10,7 +10,7 @@ COPY pyproject.toml ./
 COPY ocr_processor ./ocr_processor
 RUN pip install --no-cache-dir .
 USER 10001:10001
-EXPOSE 8090
+EXPOSE 8081
 CMD ["python", "-m", "ocr_processor"]
 
 FROM runtime AS test

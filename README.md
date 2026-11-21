@@ -53,7 +53,7 @@ python -c "import secrets; print(secrets.token_hex(32))"
 # Put the generated value in OCR_API_KEY in .env.
 # For structured extraction, also set LLM_BASE_URL, LLM_MODEL and any LLM_API_KEY.
 docker compose up --build -d --wait
-curl http://127.0.0.1:8090/health
+curl http://127.0.0.1:8081/health
 ```
 
 An example hosted configuration is `LLM_BASE_URL=https://api.openai.com/v1`,
@@ -94,7 +94,7 @@ JSON instance. `instructions` is a form string. `force_ocr` is `true` or `false`
 File contents determine parsing; caller filenames and content types are not trusted.
 
 ```sh
-curl --fail-with-body http://127.0.0.1:8090/v1/extract \
+curl --fail-with-body http://127.0.0.1:8081/v1/extract \
   -H "Authorization: Bearer $OCR_API_KEY" \
   -F 'documents=@statement.pdf' \
   -F 'documents=@receipt.png' \
@@ -173,7 +173,7 @@ currency precision. Keep the result as an editable preview requiring user review
 apply Hoard Counter's own account, currency, balance, duplicate and import validation
 before persisting anything. An account's identity and a payee's name are different fields.
 
-For host processes use `http://127.0.0.1:8090`. To call from a Hoard Counter container,
+For host processes use `http://127.0.0.1:8081`. To call from a Hoard Counter container,
 attach its backend and this service to an explicit shared Docker network. For example,
 create `document-services`, then use separate Compose overrides:
 
@@ -194,7 +194,7 @@ services:
   api:
     networks: [default, documents]
     environment:
-      OCR_URL: http://processor:8090
+      OCR_URL: http://processor:8081
       OCR_API_KEY: ${OCR_API_KEY}
 networks:
   documents:
