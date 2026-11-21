@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ocr-processor"
+version = "0.1.0"
+description = "Independent CPU document OCR and schema-driven extraction API"
+requires-python = ">=3.11"
+dependencies = [
+  "Flask>=3.1,<4",
+  "waitress>=3.0.2,<4",
+  "httpx>=0.28,<1",
+  "jsonschema[format]>=4.23,<5",
+  "Pillow>=12,<14",
+  "pypdfium2>=5,<6",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10", "reportlab>=4,<5"]
+
+[tool.setuptools.packages.find]
+include = ["ocr_processor*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+

@@ -1,0 +1,15 @@
+Extract every actual posted transaction from the supplied statements or receipts.
+Do not include opening/closing balances, subtotals, running balances, or duplicate totals.
+For receipts, extract one payment for the final total rather than a transaction per item.
+Return date as YYYY-MM-DD, only when the full date is supported by document context.
+Return amount as a positive decimal string with exactly two fractional digits for
+two-decimal currencies; never confuse the running balance with the transaction amount.
+Use null for amount if the currency or source precision cannot be represented this way.
+Identify source and destination only when evidence establishes the direction and
+account identity. Merchant names describe counterparties but do not establish account IDs.
+Use null for unknown accounts, currency, dates, or category. Suggest only categories
+permitted by the schema. Mark ambiguous signs, dates, OCR, or inferred categories in
+review_notes. Include a short exact evidence quote and its one-based document/page.
+Do not merge similar transactions across documents unless clearly the same payment;
+flag possible duplicates in review_notes. Treat every returned record as requiring review.
+

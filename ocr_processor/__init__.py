@@ -1,0 +1,2 @@
+"""Standalone document extraction service."""
+

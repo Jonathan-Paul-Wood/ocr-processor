@@ -1,0 +1,10 @@
+*
+!pyproject.toml
+!ocr_processor/
+!ocr_processor/**
+!tests/
+!tests/**
+!examples/
+!examples/**
+**/__pycache__
+
