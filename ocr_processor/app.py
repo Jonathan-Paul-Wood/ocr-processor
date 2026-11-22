@@ -71,7 +71,7 @@ def create_app(settings=None, worker_runner=run_worker):
         if endpoint.scheme not in {"http", "https"} or not endpoint.netloc or endpoint.username or endpoint.password or endpoint.query or endpoint.fragment:
             raise RuntimeError("LLM_BASE_URL must be an HTTP(S) URL without credentials, query, or fragment.")
     app = Flask(__name__)
-    app.config.update(MAX_CONTENT_LENGTH=settings.max_upload_bytes, MAX_FORM_MEMORY_SIZE=64 * 1024, MAX_FORM_PARTS=12)
+    app.config.update(MAX_CONTENT_LENGTH=settings.max_upload_bytes, MAX_FORM_MEMORY_SIZE=512 * 1024, MAX_FORM_PARTS=12)
     slot = threading.BoundedSemaphore(1)
 
     @app.before_request
