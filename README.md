@@ -137,8 +137,46 @@ network timeout and 8,192 output tokens. Split large statements into smaller req
 reconcile cross-request duplicates in the caller. Upload reception time is separate
 from the processing budget; configure upstream connection/upload timeouts as needed.
 
-Errors are `{"error":{"code":"...","message":"..."}}`. Every response has
-`X-Request-ID` and `Cache-Control: no-store`.
+Errors have `code`, a readable `message`, and structured diagnostic `details`:
+
+```json
+{
+  "error": {
+    "code": "page_limit",
+    "message": "Combined page count exceeds the limit.",
+    "details": {
+      "stage": "document_read",
+      "document": 2,
+      "limit": "pages",
+      "actual": 35,
+      "maximum": 30,
+      "document_pages": 20,
+      "previous_pages": 15,
+      "request_id": "e9f0d763-97dd-443d-bbbc-a8ba4ed6d1b3"
+    }
+  }
+}
+```
+
+Every response has `X-Request-ID` and `Cache-Control: no-store`. Error details repeat
+that request ID for correlation. Depending on the failure, details identify the
+processing stage, one-based document/page, measured value and limit, missing setting
+names, OCR exit status/language diagnostic, timeout budget, or worker exit code/signal.
+Model errors report the upstream HTTP status and available identifier metadata
+(`provider_error_code`, `provider_error_type`, `provider_error_param`,
+`provider_request_id`) with a troubleshooting hint. Output validation failures identify
+the schema constraint and instance/schema paths. Treat the available fields as
+failure-specific; clients should tolerate additional fields.
+
+Diagnostics exclude document text, extracted values, credentials, arbitrary upstream
+error messages, and raw OCR stderr. Unexpected exceptions include their type and
+service code locations (file/function/line), without exception text, source code,
+absolute paths, locals, or a raw traceback. OCR stderr is inspected only for known
+failure signatures in the request's temporary directory and removed with the request.
+When calling through Hoard Counter, its adapter preserves this envelope under
+`error.details.processor_error`, alongside `processor_http_status` and the upstream
+`processor_request_id` when present. Both applications need rebuilding to use the
+updated diagnostics end to end.
 
 | HTTP status | Meaning |
 | --- | --- |

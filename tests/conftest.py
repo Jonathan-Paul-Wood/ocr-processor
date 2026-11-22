@@ -40,9 +40,12 @@ def provider(settings):
             state["requests"].append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
             self.send_response(state["status"])
             self.send_header("Content-Type", "application/json")
+            for key, value in state.get("headers", {}).items():
+                self.send_header(key, value)
             self.end_headers()
-            self.wfile.write(json.dumps({"choices": [{"finish_reason": state["finish_reason"],
-                                                     "message": {"content": state["content"]}}]}).encode())
+            payload = state.get("response", {"choices": [{"finish_reason": state["finish_reason"],
+                                                         "message": {"content": state["content"]}}]})
+            self.wfile.write(json.dumps(payload).encode())
 
         def log_message(self, *args):
             pass

@@ -7,18 +7,21 @@ import time
 
 from .config import Settings
 from .documents import read_documents
-from .errors import ServiceError
+from .errors import ServiceError, error_context, unexpected_error
 from .extraction import extract
 from .schema import load_json, validate_schema
 
 
 def process(job, directory, settings):
     deadline = time.monotonic() + settings.timeout
-    validator = validate_schema(job["schema"]) if job["mode"] == "extract" else None
-    pages, warnings = read_documents(job["files"], directory, settings, deadline, job["force_ocr"])
+    with error_context(stage="schema_validation"):
+        validator = validate_schema(job["schema"]) if job["mode"] == "extract" else None
+    with error_context(stage="document_read"):
+        pages, warnings = read_documents(job["files"], directory, settings, deadline, job["force_ocr"])
     result = {"pages": pages, "warnings": warnings}
     if validator is not None:
-        result["data"] = extract(pages, job["instructions"], job["schema"], validator, settings, deadline)
+        with error_context(stage="model_extraction"):
+            result["data"] = extract(pages, job["instructions"], job["schema"], validator, settings, deadline)
         result["warnings"].append("Machine-extracted data requires review before financial import; schema validation does not establish factual accuracy.")
     return result
 
@@ -31,9 +34,9 @@ def main():
         output = {"status": 200, "body": process(job, directory, settings)}
     except ServiceError as exc:
         output = {"status": exc.status, "body": exc.payload()}
-    except Exception:
-        # No tracebacks containing document data, provider output, or credentials.
-        output = {"status": 500, "body": {"error": {"code": "processing_failed", "message": "Document processing failed."}}}
+    except Exception as exc:
+        error = unexpected_error(exc, "worker")
+        output = {"status": error.status, "body": error.payload()}
     (directory / "result.json").write_text(json.dumps(output, allow_nan=False), encoding="utf-8")
 
 
