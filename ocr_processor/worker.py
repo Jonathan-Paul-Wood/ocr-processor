@@ -6,6 +6,7 @@ import sys
 import time
 
 from .config import Settings
+from .debug_log import WorkerDebugLog
 from .documents import read_documents
 from .errors import ServiceError, error_context, unexpected_error
 from .extraction import extract
@@ -13,6 +14,7 @@ from .schema import load_json, validate_schema
 
 
 def process(job, directory, settings):
+    debug = WorkerDebugLog(settings, job.get("request_id")) if settings.debug_mode else None
     deadline = time.monotonic() + settings.timeout
     with error_context(stage="schema_validation"):
         validator = validate_schema(job["schema"]) if job["mode"] == "extract" else None
@@ -21,7 +23,7 @@ def process(job, directory, settings):
     result = {"pages": pages, "warnings": warnings}
     if validator is not None:
         with error_context(stage="model_extraction"):
-            result["data"] = extract(pages, job["instructions"], job["schema"], validator, settings, deadline)
+            result["data"] = extract(pages, job["instructions"], job["schema"], validator, settings, deadline, debug_log=debug)
         result["warnings"].append("Machine-extracted data requires review before financial import; schema validation does not establish factual accuracy.")
     return result
 

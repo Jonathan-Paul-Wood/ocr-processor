@@ -9,25 +9,34 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import uuid
 from urllib.parse import urlsplit
 
-from flask import Flask, g, jsonify, request
+from flask import Flask, current_app, g, has_app_context, has_request_context, jsonify, request
 from werkzeug.exceptions import HTTPException
 
 from .config import Settings
+from .debug_log import DebugLog, body_for_log, forward_worker_events
 from .errors import ServiceError, unexpected_error
 from .schema import load_json
 
 
 def run_worker(directory, settings):
+    debug = current_app.extensions.get("traffic_debug") if has_app_context() and settings.debug_mode else None
+    request_id = g.request_id if has_request_context() else None
     options = {"start_new_session": True} if os.name != "nt" else {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
     process = subprocess.Popen(
         [sys.executable, "-m", "ocr_processor.worker", str(directory)],
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE if settings.debug_mode else subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         env={**os.environ, "OCR_WORKER_SETTINGS": json.dumps(asdict(settings))},
         **options,
     )
+    reader = None
+    if settings.debug_mode:
+        reader = threading.Thread(target=forward_worker_events, args=(process.stdout, debug, request_id),
+                                  name="traffic-worker-reader", daemon=True)
+        reader.start()
     try:
         process.wait(timeout=settings.timeout + 5)
     except subprocess.TimeoutExpired:
@@ -43,6 +52,9 @@ def run_worker(directory, settings):
         raise ServiceError("timeout", "Document processing exceeded its time limit.", 504,
                            details={"stage": "worker", "timeout_seconds": settings.timeout,
                                     "cleanup_allowance_seconds": 5}) from None
+    finally:
+        if reader is not None:
+            reader.join(timeout=2)
     result = directory / "result.json"
     if process.returncode != 0 or not result.exists():
         details = {"stage": "worker", "exit_code": process.returncode, "result_file_present": result.exists(),
@@ -71,12 +83,25 @@ def create_app(settings=None, worker_runner=run_worker):
         if endpoint.scheme not in {"http", "https"} or not endpoint.netloc or endpoint.username or endpoint.password or endpoint.query or endpoint.fragment:
             raise RuntimeError("LLM_BASE_URL must be an HTTP(S) URL without credentials, query, or fragment.")
     app = Flask(__name__)
+    app.debug = False
+    debug = DebugLog(settings.debug_log_dir or os.path.join(tempfile.gettempdir(), "ocr-processor-debug"),
+                     (settings.api_key, settings.llm_api_key)) if settings.debug_mode else None
+    app.extensions["traffic_debug"] = debug
     app.config.update(MAX_CONTENT_LENGTH=settings.max_upload_bytes, MAX_FORM_MEMORY_SIZE=512 * 1024, MAX_FORM_PARTS=12)
     slot = threading.BoundedSemaphore(1)
 
     @app.before_request
     def authorize():
         g.request_id = str(uuid.uuid4())
+        if debug:
+            g.debug_started = time.monotonic()
+            g.debug_body_captured = False
+            try:
+                debug.emit("api.request", g.request_id, method=request.method, path=request.path,
+                           query=request.args.to_dict(flat=False), headers=dict(request.headers),
+                           content_type=request.content_type, byte_count=request.content_length)
+            except Exception:
+                debug.emit("logging.capture_failed", g.request_id, stage="api_request")
         if request.path != "/health":
             expected = "Bearer " + settings.api_key
             if not hmac.compare_digest(request.headers.get("Authorization", "").encode(), expected.encode()):
@@ -98,6 +123,17 @@ def create_app(settings=None, worker_runner=run_worker):
                 details["request_id"] = g.request_id
                 body["error"]["details"] = details
                 response.set_data(app.json.dumps(body))
+        if debug:
+            try:
+                body = ({"omitted": "streaming_response"} if response.is_streamed else
+                        body_for_log(response.get_data(), response.content_type or ""))
+                fields = {"status": response.status_code, "headers": dict(response.headers), "body": body,
+                          "duration_ms": round((time.monotonic() - g.debug_started) * 1000, 3)}
+                if request.method in {"POST", "PUT", "PATCH"} and not g.debug_body_captured:
+                    fields["request_body_omitted_reason"] = "Request rejected before supported multipart fields could be captured; raw bodies and file bytes are never logged."
+                debug.emit("api.response", g.request_id, **fields)
+            except Exception:
+                debug.emit("logging.capture_failed", g.request_id, stage="api_response")
         return response
 
     @app.errorhandler(ServiceError)
@@ -148,6 +184,24 @@ def create_app(settings=None, worker_runner=run_worker):
             if request.mimetype != "multipart/form-data":
                 raise ServiceError("invalid_request", "Use multipart/form-data.", 400,
                                    details={"stage": "request", "expected_content_type": "multipart/form-data"})
+            if debug:
+                # Use the normal bounded parser; never consume the raw upload for logging.
+                try:
+                    files = []
+                    for field, upload in request.files.items(multi=True):
+                        position = upload.stream.tell()
+                        try:
+                            byte_count = upload.stream.seek(0, os.SEEK_END)
+                        finally:
+                            upload.stream.seek(position)
+                        files.append({"field": field, "filename": upload.filename, "content_type": upload.content_type,
+                                      "byte_count": byte_count, "body_omitted": "file_content"})
+                    debug.emit("api.input", g.request_id, fields=request.form.to_dict(flat=False), files=files)
+                    g.debug_body_captured = True
+                except HTTPException:
+                    raise
+                except Exception:
+                    debug.emit("logging.capture_failed", g.request_id, stage="api_input")
             if set(request.files) - {"documents"} or set(request.form) - {"instructions", "schema", "force_ocr"}:
                 raise ServiceError("invalid_request", "Unknown request fields.", 400,
                                    details={"stage": "request", "allowed_file_fields": ["documents"],
@@ -192,6 +246,8 @@ def create_app(settings=None, worker_runner=run_worker):
                                            details={"stage": "upload", "document": index + 1, "bytes": 0})
                     paths.append(str(path))
                 job = {"mode": mode, "files": paths, "instructions": instructions, "schema": schema, "force_ocr": force == "true"}
+                if debug:
+                    job["request_id"] = g.request_id
                 (directory / "job.json").write_text(json.dumps(job), encoding="utf-8")
                 output = worker_runner(directory, settings)
                 return jsonify(output["body"]), output["status"]

@@ -1,4 +1,5 @@
 import os
+import tempfile
 from dataclasses import dataclass
 
 
@@ -17,6 +18,8 @@ class Settings:
     ocr_timeout: int = 30
     ocr_language: str = "eng"
     tesseract_cmd: str = "tesseract"
+    debug_mode: bool = False
+    debug_log_dir: str = ""
 
     @classmethod
     def from_env(cls):
@@ -28,5 +31,7 @@ class Settings:
             timeout=int(os.getenv("REQUEST_TIMEOUT_SECONDS", "180")),
             ocr_language=os.getenv("OCR_LANGUAGE", "eng"),
             tesseract_cmd=os.getenv("TESSERACT_CMD", "tesseract"),
+            debug_mode=os.getenv("DEBUG_MODE", "FALSE").strip().upper() == "TRUE",
+            debug_log_dir=os.getenv("DEBUG_LOG_DIR", os.path.join(tempfile.gettempdir(), "ocr-processor-debug")),
         )
 

@@ -194,11 +194,81 @@ updated diagnostics end to end.
 The service does not save jobs/results, import transactions, or make financial writes.
 Uploads, OCR intermediates, instructions, and results use request-scoped temporary
 directories removed after completion/failure. In Compose they live in tmpfs. The
-service does not log document bodies or provider responses; reverse-proxy logging
+service does not log document bodies or provider responses when `DEBUG_MODE=FALSE`;
+the optional debug capture described below includes financial text. Reverse-proxy logging
 and provider retention policies are separate. A hard host/process crash can leave
 temporary files until cleanup/restart outside Compose. Treat the API key as access
 to all extraction functionality; this version has no tenants, per-client quotas,
 separate client keys, asynchronous jobs, or persistent audit history.
+
+## Optional debug traffic capture
+
+Set `DEBUG_MODE=TRUE` in `.env` and recreate the service:
+
+```sh
+docker compose up -d --build --force-recreate processor
+```
+
+The default is `FALSE`. Only the value `TRUE` (case-insensitive, ignoring surrounding
+whitespace) enables capture; all other values disable it. This setting does not enable
+Flask's development debugger. Changing `.env` requires container recreation; restarting
+an existing container does not update its environment.
+
+Debug events are stored as timestamped JSON Lines in `/debug/traffic.jsonl`, on a
+64 MiB container tmpfs owned by the service user. There is no database, and no need to
+keep a terminal attached. `docker compose up -d` leaves your terminal free. Read a
+snapshot when needed:
+
+```sh
+docker compose exec -T processor tail -n 20 /debug/traffic.jsonl
+docker compose cp processor:/debug ./ocr-debug
+```
+
+Every line has a UTC `timestamp`, an `event` type, and the API `request_id` shared by
+the request, worker, LLM traffic, and `X-Request-ID` response header. Events include:
+
+- `api.request`: method, path, query fields, sanitized headers, and request size.
+- `api.input`: parsed multipart text fields (instructions/schema/options) and uploaded
+  file metadata (field name, filename, content type, byte count). PDF/image/file bytes
+  are never copied into the log.
+- `api.response`: status, sanitized headers, body, and total duration. Rejected requests
+  explain why their body was not captured; logging never bypasses request-size or auth checks.
+- `llm.request`: URL, method, sanitized headers, complete JSON payload including model,
+  instructions, schema, and extracted document text, subject to the event size limit.
+- `llm.response`: upstream status, sanitized headers, response body, and duration,
+  including provider error responses. Binary response bodies are represented as metadata.
+- `llm.error`: exception messages and cause chains, helping distinguish connection refusal,
+  DNS errors, TLS verification failures, and timeouts. Public error responses remain unchanged.
+
+Authentication/cookie headers, credential fields, and the configured OCR/LLM API-key
+values are redacted. **Financial text, account information, prompts, and extracted values
+remain visible in debug logs.** Keep exported snapshots private and turn debug mode off
+when troubleshooting is finished.
+
+Each event is capped at **1 MiB including its JSON envelope and newline**. Larger events
+retain a redacted `content_preview`, set `truncated: true`, and report `original_size_bytes`
+(the full redacted event's encoded size). Each snapshot retains the latest **100 events**,
+evicting older events sooner if their total exceeds **30 MiB**. The extra space in the
+64 MiB mount allows an atomic replacement snapshot without partially written JSON lines.
+Health checks count as events too, so this is recent traffic, not a persistent audit log.
+
+The API process uses one background writer and an eight-event bounded queue. Workers
+stream events through a drained stdout pipe and never reset the file. Queue overflow
+drops debug events without delaying extraction; a `logging.dropped_events` event reports
+the count after writing resumes. Logging/storage failures issue a brief metadata-only
+stderr warning and do not change extraction results. Graceful shutdown attempts to flush
+for at most two seconds; hard crashes and overloaded logging can lose events.
+
+Logs start fresh on each API process start, not each worker or request. A normal
+`docker compose up` may reuse an already-running container and therefore leave logs
+unchanged; `--force-recreate processor` explicitly starts a fresh session. Container tmpfs
+logs disappear on restart/recreation. **Export needed evidence before restarting.**
+
+For local Python execution the default directory is `ocr-processor-debug` within the
+system temporary directory. An optional `DEBUG_LOG_DIR` environment variable overrides
+that directory; Compose fixes it to `/debug`. Local debug files are also reset when the
+application starts with debug enabled. With debug disabled no debug files or writer
+threads are created; existing local exports are not deleted.
 
 ## Calling from Hoard Counter
 

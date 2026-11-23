@@ -7,6 +7,7 @@ from jsonschema.exceptions import ValidationError
 from referencing.exceptions import Unresolvable
 
 from .errors import ServiceError
+from .debug_log import capture_llm_error, capture_llm_response, safe_url
 from .schema import load_json
 
 
@@ -52,7 +53,7 @@ def provider_details(response, raw, settings):
     return details
 
 
-def extract(pages, instructions, schema, validator, settings, deadline):
+def extract(pages, instructions, schema, validator, settings, deadline, debug_log=None):
     body = {
         "model": settings.llm_model,
         "messages": [
@@ -71,6 +72,13 @@ def extract(pages, instructions, schema, validator, settings, deadline):
         raise ServiceError("timeout", "Request exceeded its time limit.", 504,
                            details={"stage": "model_request", "timeout_seconds": settings.timeout})
     timeout = min(90, remaining)
+    if debug_log:
+        started = time.monotonic()
+        try:
+            debug_log.emit("llm.request", method="POST", url=safe_url(settings.llm_base_url + "/chat/completions"),
+                           headers={"Content-Type": "application/json", **headers}, body=body, timeout_seconds=round(timeout, 3))
+        except Exception:
+            debug_log.emit("logging.capture_failed", stage="llm_request")
     try:
         # No redirects, environment proxies, retries, provider bodies in errors, or unbounded reads.
         with httpx.Client(timeout=timeout, trust_env=False) as client:
@@ -79,16 +87,24 @@ def extract(pages, instructions, schema, validator, settings, deadline):
                 for chunk in response.iter_bytes():
                     raw.extend(chunk)
                     if len(raw) > 1024 * 1024:
+                        if debug_log:
+                            capture_llm_response(debug_log, response, raw, started, incomplete=True, reason="provider_response_limit_exceeded")
                         raise ServiceError("provider_error", "Model response exceeds the limit.", 502,
                                            details={"stage": "model_response", "limit": "provider_response_bytes",
                                                     "actual": len(raw), "maximum": 1024 * 1024})
+                if debug_log:
+                    capture_llm_response(debug_log, response, raw, started)
                 if response.status_code >= 300:
                     raise ServiceError("provider_error", "Model provider rejected the request; check model, schema support, and credentials.", 502,
                                        details=provider_details(response, raw, settings))
     except httpx.TimeoutException as exc:
+        if debug_log:
+            capture_llm_error(debug_log, exc, started)
         raise ServiceError("timeout", "Model provider timed out.", 504,
                            details={"stage": "model_request", "exception_type": type(exc).__name__, "timeout_seconds": round(timeout, 3)}) from None
     except httpx.HTTPError as exc:
+        if debug_log:
+            capture_llm_error(debug_log, exc, started)
         raise ServiceError("provider_error", "Model provider could not be reached.", 502,
                            details={"stage": "model_request", "exception_type": type(exc).__name__,
                                     "hint": "Check LLM_BASE_URL, DNS, TLS certificates, and network reachability from the processor container."}) from None
