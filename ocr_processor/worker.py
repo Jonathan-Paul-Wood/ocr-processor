@@ -12,6 +12,7 @@ from .errors import ServiceError, error_context, unexpected_error
 from .extraction import extract
 from .schema import load_json, validate_schema
 from .systemone import infer, validate_questions
+from .transactions import extract_transactions
 
 
 def process(job, directory, settings):
@@ -20,7 +21,7 @@ def process(job, directory, settings):
     if job["mode"] == "systemone":
         validate_questions(job["questions"])
     with error_context(stage="schema_validation"):
-        validator = validate_schema(job["schema"]) if job["mode"] == "extract" else None
+        validator = validate_schema(job["schema"]) if job["mode"] in {"extract", "transactions"} else None
     with error_context(stage="document_read"):
         pages, warnings = read_documents(job["files"], directory, settings, deadline, job["force_ocr"])
     result = {"pages": pages, "warnings": warnings}
@@ -28,7 +29,11 @@ def process(job, directory, settings):
         with error_context(stage="systemone_inference"):
             result["data"] = infer(pages, job["questions"], settings, deadline, debug_log=debug)
         result["warnings"].append("Machine decisions require review; confidence does not establish factual accuracy.")
-    if validator is not None:
+    if job["mode"] == "transactions":
+        result["data"], transaction_warnings = extract_transactions(
+            pages, job["context"], validator, settings, deadline, debug_log=debug)
+        result["warnings"].extend(transaction_warnings)
+    if job["mode"] == "extract":
         with error_context(stage="model_extraction"):
             result["data"] = extract(pages, job["instructions"], job["schema"], validator, settings, deadline, debug_log=debug)
         result["warnings"].append("Machine-extracted data requires review before financial import; schema validation does not establish factual accuracy.")

@@ -63,11 +63,11 @@ def _valid_response(data, questions):
     return True
 
 
-def infer(pages, questions, settings, deadline, debug_log=None):
+def infer(pages, questions, settings, deadline, debug_log=None, state=None):
     url = settings.systemone_base_url + "/v1/systemone"
-    body = {"model": settings.systemone_model, "state": {"pages": pages}, "questions": questions}
+    body = {"model": settings.systemone_model, "state": state if state is not None else {"pages": pages}, "questions": questions}
     headers = {"Authorization": f"Bearer {settings.systemone_api_key}"} if settings.systemone_api_key else {}
-    remaining = deadline - time.monotonic()
+    remaining = min(settings.systemone_timeout, deadline - time.monotonic())
     if remaining <= 0:
         raise ServiceError("timeout", "Request exceeded its time limit.", 504,
                            details={"stage": "systemone_request", "timeout_seconds": settings.timeout})

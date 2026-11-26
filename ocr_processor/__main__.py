@@ -15,7 +15,7 @@ if __name__ == "__main__":
         signal.signal(signal.SIGTERM, terminate)
     try:
         serve(app, host="0.0.0.0", port=8081, threads=4,
-              max_request_body_size=20 * 1024 * 1024, channel_timeout=240)
+              max_request_body_size=20 * 1024 * 1024, channel_timeout=1900)
     finally:
         if debug:
             debug.close(timeout=2)

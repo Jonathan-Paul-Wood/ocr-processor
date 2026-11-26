@@ -75,6 +75,12 @@ def read_documents(files, directory, settings, deadline, force_ocr=False):
 
     def read_file(index, filename):
         path = Path(filename)
+        from .csv_documents import csv_rows
+        rows = csv_rows(path.read_bytes())
+        if rows is not None:
+            import json
+            append(index, 1, json.dumps(rows, ensure_ascii=False), "csv")
+            return
         with path.open("rb") as source:
             signature = source.read(5)
         if signature == b"%PDF-":

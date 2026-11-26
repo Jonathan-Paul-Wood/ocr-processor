@@ -1,6 +1,6 @@
 # OCR Processor
 
-Independent HTTP service for extracting structured data from PDFs and receipt images.
+Independent HTTP service for extracting structured data from PDFs, CSV transaction lists and receipt images.
 It accepts documents, caller instructions, and a JSON Schema; it returns validated
 JSON plus page-level source text.
 
@@ -12,17 +12,17 @@ JSON plus page-level source text.
   handles broken text layers and scans with substantial text headers.
 - **Tesseract 5, English**: CPU OCR for scanned PDFs, PNG, JPEG, TIFF and WebP.
   Pages run sequentially with one OpenMP thread. Multi-frame images are supported.
-- **A separately configured model endpoint**: interprets instructions, identifies
-  fields, suggests categories, and returns JSON constrained by the supplied schema.
-  Responses are independently validated with JSON Schema draft 2020-12 and format checks.
+- **SystemOne / Kev Ranker**: chooses posted transactions, dates/amounts from observed
+  evidence, source/destination accounts, direction/refund and categories. Hoard Counter
+  uses this route without any generative LLM configuration.
+- **Optional generic LLM extraction**: `/v1/extract` remains available to other callers
+  for instruction-driven JSON extraction; Hoard Counter does not use it.
 
-Tesseract recognizes text; it does not understand arbitrary extraction instructions
-or reliably infer transaction direction and categories by itself. On a server sharing
-a few GB of RAM with Hoard Counter, the recommended starting point is local OCR plus
-a hosted model for structuring, **if sending statement text to that provider is acceptable**.
-There is no default provider, no model download, and no external call until configured.
-Only extracted page text and caller instructions/schema go to the configured endpoint,
-not original PDFs/images. Original text can still contain sensitive account information.
+Tesseract recognizes text; transaction row candidates are found locally and Kev makes
+structured choices over observed evidence and caller account/category/rule context.
+CSV is parsed directly (UTF-8 or BOM-marked UTF-16; comma, semicolon or tab delimiter;
+header plus equally sized data rows). Document text is evidence, never instructions.
+Only extracted text and context go to Kev, not original file bytes.
 
 Compose caps this service at **1 GB RAM and one CPU**, with 256 MB temporary storage.
 These are deployment limits, not measured usage guarantees. PDF decoding can exceed
@@ -51,12 +51,13 @@ still require review. This service uses plain text, not a layout or vision model
 cp .env.example .env
 python -c "import secrets; print(secrets.token_hex(32))"
 # Put the generated value in OCR_API_KEY in .env.
-# For structured extraction, also set LLM_BASE_URL, LLM_MODEL and any LLM_API_KEY.
+# For Hoard Counter, set SYSTEMONE_IP, SYSTEMONE_PORT, SYSTEMONE_MODEL and any SYSTEMONE_API_KEY.
+# LLM_* settings can remain empty. They are only needed for the generic /v1/extract route.
 docker compose up --build -d --wait
 curl http://127.0.0.1:8081/health
 ```
 
-An example hosted configuration is `LLM_BASE_URL=https://api.openai.com/v1`,
+For the optional generic `/v1/extract` route, an example hosted configuration is `LLM_BASE_URL=https://api.openai.com/v1`,
 `LLM_MODEL=gpt-4o-mini`, and your provider key in `LLM_API_KEY`. Verify that the
 selected provider/model supports Chat Completions `response_format.type=json_schema`
 with `strict=true` and your schema keywords. Compatible endpoints vary; unsupported
@@ -87,6 +88,7 @@ Install additional Tesseract language packs in a derived image and set `OCR_LANG
 | `GET /v1/capabilities` | Bearer auth | Configuration flags, formats, limits |
 | `POST /v1/text` | Multipart `documents`, optional `force_ocr` | Page text and warnings; works without a model |
 | `POST /v1/extract` | Multipart `documents`, `instructions`, `schema`, optional `force_ocr` | Schema-validated `data`, page text and warnings |
+| `POST /v1/transactions` | Multipart `documents`, `context`, `output_format`, optional `force_ocr` | SystemOne transaction list in schema-validated `data`, pages and warnings |
 | `POST /v1/systemone` | Multipart `documents`, `questions`, optional `force_ocr` | Typed ranker decisions in `data`, page text and warnings |
 
 Repeat the `documents` part for each upload, in the desired document order. Supply
@@ -128,6 +130,43 @@ references, schema IDs, and dynamic anchors are rejected. For strict provider sc
 use `additionalProperties: false`, make fields required, and allow `null` for unknowns.
 Some format checkers ignore unknown format names. Schema validation checks structure
 and declared supported formats, not truth, evidence quotes, deduplication, or completeness.
+
+### Hoard Counter transaction imports (no LLM)
+
+`POST /v1/transactions` accepts `documents`, JSON `context` and `output_format` as
+JSON Schema draft 2020-12. Context contains `accounts` (IDs, names, descriptions,
+numbers, types/classes, currencies), `categories` (IDs, names, descriptions), enabled
+`rules`, and `currencies` (codes/precision). Context is limited to 64,000 characters;
+accounts and categories each allow at most 254 entries plus an unknown choice.
+
+Each CSV record is a candidate. Dated text rows and their continuation lines form
+statement candidates; a page without multiple dated rows is a receipt/page candidate.
+Kev receives each candidate with its document text and caller context, and answers
+choice questions for posted status, date, amount, currency, own/source/destination
+accounts, category, direction and refund. Dates/amounts are restricted to observed
+candidates; ambiguous values can remain null. Receipt items are kept together and Kev
+selects the final paid total. Summary/pending entries can be excluded by Kev.
+
+The response's `data.transactions` uses Hoard Counter's extraction fields: `date`,
+`description`, `amount`, `currency`, `account_id`, `account_number`, `source_account_id`,
+`destination_account_id`, `category_id`, `direction`, `is_refund`, `document`, `page`,
+and `review_notes`. `output_format` validates this shape; it does not rename fields.
+Unknowns remain null; document/page references remain one-based. At most 500 candidates
+are processed. Mirrors remain separate; Hoard Counter performs the existing duplicate/
+transfer checks, applies deterministic rules before review, and saves only on approval.
+
+Row detection is limited by text layout: unusual/multi-column statements, transactions
+without recognizable numeric or month-first dates, and multiple receipts on one page
+may need separate uploads or CSV. Review the count against the original document;
+there is no automatic LLM fallback. Test accuracy on representative household files.
+
+Default deadlines: 1,800 seconds per batch (`REQUEST_TIMEOUT_SECONDS`), 600 seconds
+per Kev call (`SYSTEMONE_TIMEOUT_SECONDS`, capped by remaining batch budget), and
+120 seconds per OCR page (`OCR_TIMEOUT_SECONDS`). Kev Ranker defaults to 600 seconds
+for inference (`KEV_INFERENCE_TIMEOUT`). Hoard Counter waits 1,830 seconds and its
+application/proxies allow 1,900 seconds. Existing `.env` overrides retain their values;
+update them when deploying. Increasing the batch budget further also requires updating
+Hoard Counter/proxy limits. Large or slow batches may still need splitting.
 
 ### SystemOne / rank-categorizer inference
 
@@ -182,8 +221,8 @@ route falls back to the other provider. `/v1/capabilities` independently reports
 `systemone_configured` and `extraction_configured`; these flags indicate configuration,
 not remote readiness. No provider/model downloads or local inference are added.
 
-The SystemOne call uses the remaining request processing budget (180 seconds by
-default), with the same worker deadline and 1 MiB upstream response limit. There
+The SystemOne call uses the remaining request processing budget (1,800 seconds by
+default), capped at `SYSTEMONE_TIMEOUT_SECONDS` (600 seconds), with the same worker deadline and 1 MiB upstream response limit. There
 are no redirects or automatic retries. Upstream HTTP rejections become sanitized
 502 errors with `provider_http_status`; timeouts return 504. Invalid response
 envelopes or answers return 502 `invalid_inference`. Decisions still need review.
@@ -193,8 +232,8 @@ but document text, questions, and decisions remain visible.
 
 Default limits: 20 MiB **total HTTP request**, five files, 30 total pages, 16 million
 pixels per page, 100,000 extracted text characters, 16,000 instruction characters,
-32,000 schema characters, and 1 MiB provider response. OCR is limited to 30 seconds
-per page; the processing budget is 180 seconds (`REQUEST_TIMEOUT_SECONDS`), with five
+32,000 schema characters, and 1 MiB provider response. OCR is limited to 120 seconds
+per page; the processing budget is 1,800 seconds (`REQUEST_TIMEOUT_SECONDS`), with five
 seconds of parent-process cleanup allowance. The provider call has a maximum 90-second
 network timeout and 8,192 output tokens. Split large statements into smaller requests;
 reconcile cross-request duplicates in the caller. Upload reception time is separate
@@ -377,7 +416,7 @@ Run each with `docker compose -f compose.yaml -f compose.network.yaml up -d`.
 These examples only establish connectivity and environment variables; the Hoard
 Counter upload UI and caller/import integration are a separate change. No files in
 Hoard Counter are changed by this service implementation. Use a response timeout
-of at least 200 seconds. Retry 429 with backoff; do not blindly retry provider failures
+of at least 1,830 seconds. Retry 429 with backoff; do not blindly retry provider failures
 as an interrupted request may already have incurred provider costs.
 
 ## Development and verification

@@ -77,8 +77,8 @@ def create_app(settings=None, worker_runner=run_worker):
     settings = settings or Settings.from_env()
     if len(settings.api_key) < 32:
         raise RuntimeError("Set OCR_API_KEY to a random secret of at least 32 characters.")
-    if settings.timeout < 1:
-        raise RuntimeError("REQUEST_TIMEOUT_SECONDS must be positive.")
+    if min(settings.timeout, settings.ocr_timeout, settings.systemone_timeout) < 1:
+        raise RuntimeError("Request, OCR and SystemOne timeouts must be positive.")
     if not 1 <= settings.systemone_port <= 65535:
         raise RuntimeError("SYSTEMONE_PORT must be between 1 and 65535.")
     if settings.systemone_ip:
@@ -180,14 +180,15 @@ def create_app(settings=None, worker_runner=run_worker):
     def capabilities():
         return {"extraction_configured": bool(settings.llm_base_url and settings.llm_model),
                 "systemone_configured": bool(settings.systemone_ip and settings.systemone_model),
+                "transaction_extraction_configured": bool(settings.systemone_ip and settings.systemone_model),
                 "ocr_available": shutil.which(settings.tesseract_cmd) is not None,
                 "limits": {"upload_bytes": settings.max_upload_bytes, "files": settings.max_files,
                            "pages": settings.max_pages, "pixels_per_page": settings.max_pixels,
                            "text_chars": settings.max_text_chars, "timeout_seconds": settings.timeout},
-                "formats": ["pdf", "png", "jpeg", "tiff", "webp"]}
+                "formats": ["pdf", "png", "jpeg", "tiff", "webp", "csv"]}
 
     def handle(mode):
-        if mode == "systemone" and not (settings.systemone_ip and settings.systemone_model):
+        if mode in {"systemone", "transactions"} and not (settings.systemone_ip and settings.systemone_model):
             missing = [name for name, value in [("SYSTEMONE_IP", settings.systemone_ip),
                                                ("SYSTEMONE_MODEL", settings.systemone_model)] if not value]
             raise ServiceError("systemone_unavailable", "Configure SYSTEMONE_IP and SYSTEMONE_MODEL for decision inference.", 503,
@@ -221,7 +222,8 @@ def create_app(settings=None, worker_runner=run_worker):
                     raise
                 except Exception:
                     debug.emit("logging.capture_failed", g.request_id, stage="api_input")
-            allowed_fields = {"questions", "force_ocr"} if mode == "systemone" else {"instructions", "schema", "force_ocr"}
+            allowed_fields = ({"context", "output_format", "force_ocr"} if mode == "transactions" else
+                              {"questions", "force_ocr"} if mode == "systemone" else {"instructions", "schema", "force_ocr"})
             if set(request.files) - {"documents"} or set(request.form) - allowed_fields:
                 raise ServiceError("invalid_request", "Unknown request fields.", 400,
                                    details={"stage": "request", "allowed_file_fields": ["documents"],
@@ -246,7 +248,20 @@ def create_app(settings=None, worker_runner=run_worker):
                     raise ServiceError("invalid_request", "Supply questions as a JSON object.", 400,
                                        details={"stage": "request", "field": "questions"}) from None
                 validate_questions(questions)
-            schema_text = request.form.get("schema", "{}")
+            context = None
+            if mode == "transactions":
+                from .transactions import validate_context
+                context_text = request.form.get("context", "{}")
+                if len(context_text) > 64_000:
+                    raise ServiceError("invalid_request", "Transaction context exceeds 64000 characters.", 400)
+                try:
+                    context = load_json(context_text)
+                except (ValueError, RecursionError):
+                    raise ServiceError("invalid_request", "Context must be JSON.", 400) from None
+                validate_context(context)
+                if "output_format" not in request.form:
+                    raise ServiceError("invalid_request", "Supply output_format as a JSON Schema.", 400)
+            schema_text = request.form.get("output_format" if mode == "transactions" else "schema", "{}")
             if len(instructions) > 16_000 or len(schema_text) > 32_000:
                 limits = [{"field": name, "actual": len(value), "maximum": maximum, "unit": "characters"}
                           for name, value, maximum in [("instructions", instructions, 16_000), ("schema", schema_text, 32_000)] if len(value) > maximum]
@@ -280,6 +295,8 @@ def create_app(settings=None, worker_runner=run_worker):
                 job = {"mode": mode, "files": paths, "instructions": instructions, "schema": schema, "force_ocr": force == "true"}
                 if mode == "systemone":
                     job["questions"] = questions
+                if mode == "transactions":
+                    job["context"] = context
                 if debug:
                     job["request_id"] = g.request_id
                 (directory / "job.json").write_text(json.dumps(job), encoding="utf-8")
@@ -291,5 +308,6 @@ def create_app(settings=None, worker_runner=run_worker):
     app.add_url_rule("/v1/text", "text", lambda: handle("text"), methods=["POST"])
     app.add_url_rule("/v1/extract", "extract", lambda: handle("extract"), methods=["POST"])
     app.add_url_rule("/v1/systemone", "systemone", lambda: handle("systemone"), methods=["POST"])
+    app.add_url_rule("/v1/transactions", "transactions", lambda: handle("transactions"), methods=["POST"])
     return app
 

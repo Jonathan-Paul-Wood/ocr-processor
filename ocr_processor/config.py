@@ -9,13 +9,14 @@ class Settings:
     llm_base_url: str = ""
     llm_api_key: str = ""
     llm_model: str = ""
-    timeout: int = 180
+    timeout: int = 1800
     max_upload_bytes: int = 20 * 1024 * 1024
     max_files: int = 5
     max_pages: int = 30
     max_pixels: int = 16_000_000
     max_text_chars: int = 100_000
-    ocr_timeout: int = 30
+    ocr_timeout: int = 120
+    systemone_timeout: int = 600
     ocr_language: str = "eng"
     tesseract_cmd: str = "tesseract"
     debug_mode: bool = False
@@ -41,7 +42,9 @@ class Settings:
             systemone_port=int(os.getenv("SYSTEMONE_PORT", "8009")),
             systemone_api_key=os.getenv("SYSTEMONE_API_KEY", ""),
             systemone_model=os.getenv("SYSTEMONE_MODEL", "kev-latest"),
-            timeout=int(os.getenv("REQUEST_TIMEOUT_SECONDS", "180")),
+            timeout=int(os.getenv("REQUEST_TIMEOUT_SECONDS", "1800")),
+            systemone_timeout=int(os.getenv("SYSTEMONE_TIMEOUT_SECONDS", "600")),
+            ocr_timeout=int(os.getenv("OCR_TIMEOUT_SECONDS", "120")),
             ocr_language=os.getenv("OCR_LANGUAGE", "eng"),
             tesseract_cmd=os.getenv("TESSERACT_CMD", "tesseract"),
             debug_mode=os.getenv("DEBUG_MODE", "FALSE").strip().upper() == "TRUE",
