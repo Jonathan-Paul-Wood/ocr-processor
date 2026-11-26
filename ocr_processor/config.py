@@ -20,6 +20,15 @@ class Settings:
     tesseract_cmd: str = "tesseract"
     debug_mode: bool = False
     debug_log_dir: str = ""
+    systemone_ip: str = ""
+    systemone_port: int = 8009
+    systemone_api_key: str = ""
+    systemone_model: str = "kev-latest"
+
+    @property
+    def systemone_base_url(self):
+        host = f"[{self.systemone_ip}]" if ":" in self.systemone_ip else self.systemone_ip
+        return f"http://{host}:{self.systemone_port}"
 
     @classmethod
     def from_env(cls):
@@ -28,6 +37,10 @@ class Settings:
             llm_base_url=os.getenv("LLM_BASE_URL", "").rstrip("/"),
             llm_api_key=os.getenv("LLM_API_KEY", ""),
             llm_model=os.getenv("LLM_MODEL", ""),
+            systemone_ip=os.getenv("SYSTEMONE_IP", "").strip(),
+            systemone_port=int(os.getenv("SYSTEMONE_PORT", "8009")),
+            systemone_api_key=os.getenv("SYSTEMONE_API_KEY", ""),
+            systemone_model=os.getenv("SYSTEMONE_MODEL", "kev-latest"),
             timeout=int(os.getenv("REQUEST_TIMEOUT_SECONDS", "180")),
             ocr_language=os.getenv("OCR_LANGUAGE", "eng"),
             tesseract_cmd=os.getenv("TESSERACT_CMD", "tesseract"),

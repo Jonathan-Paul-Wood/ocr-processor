@@ -18,7 +18,7 @@ MAX_RETAINED_BYTES = 30 * 1024 * 1024
 SENSITIVE_KEYS = {
     "authorization", "proxy_authorization", "cookie", "set_cookie", "x_api_key",
     "api_key", "access_token", "refresh_token", "token", "password", "secret",
-    "ocr_api_key", "llm_api_key",
+    "ocr_api_key", "llm_api_key", "systemone_api_key",
 }
 
 
@@ -220,7 +220,7 @@ class DebugLog:
 class WorkerDebugLog:
     """Send events to the parent; do not touch or reset the debug directory."""
     def __init__(self, settings, request_id):
-        self.secrets = (settings.api_key, settings.llm_api_key)
+        self.secrets = (settings.api_key, settings.llm_api_key, settings.systemone_api_key)
         self.request_id = request_id
 
     def emit(self, event, **fields):

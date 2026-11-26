@@ -20,6 +20,7 @@ from .config import Settings
 from .debug_log import DebugLog, body_for_log, forward_worker_events
 from .errors import ServiceError, unexpected_error
 from .schema import load_json
+from .systemone import validate_questions
 
 
 def run_worker(directory, settings):
@@ -78,6 +79,18 @@ def create_app(settings=None, worker_runner=run_worker):
         raise RuntimeError("Set OCR_API_KEY to a random secret of at least 32 characters.")
     if settings.timeout < 1:
         raise RuntimeError("REQUEST_TIMEOUT_SECONDS must be positive.")
+    if not 1 <= settings.systemone_port <= 65535:
+        raise RuntimeError("SYSTEMONE_PORT must be between 1 and 65535.")
+    if settings.systemone_ip:
+        try:
+            endpoint = urlsplit(settings.systemone_base_url)
+            valid = (endpoint.hostname == settings.systemone_ip.lower() and endpoint.port == settings.systemone_port
+                     and not endpoint.username and not endpoint.password and not endpoint.path
+                     and not endpoint.query and not endpoint.fragment and not any(c.isspace() for c in settings.systemone_ip))
+        except ValueError:
+            valid = False
+        if not valid:
+            raise RuntimeError("SYSTEMONE_IP must be an IP address or hostname without a scheme, port, or path.")
     if settings.llm_base_url:
         endpoint = urlsplit(settings.llm_base_url)
         if endpoint.scheme not in {"http", "https"} or not endpoint.netloc or endpoint.username or endpoint.password or endpoint.query or endpoint.fragment:
@@ -85,7 +98,7 @@ def create_app(settings=None, worker_runner=run_worker):
     app = Flask(__name__)
     app.debug = False
     debug = DebugLog(settings.debug_log_dir or os.path.join(tempfile.gettempdir(), "ocr-processor-debug"),
-                     (settings.api_key, settings.llm_api_key)) if settings.debug_mode else None
+                     (settings.api_key, settings.llm_api_key, settings.systemone_api_key)) if settings.debug_mode else None
     app.extensions["traffic_debug"] = debug
     app.config.update(MAX_CONTENT_LENGTH=settings.max_upload_bytes, MAX_FORM_MEMORY_SIZE=512 * 1024, MAX_FORM_PARTS=12)
     slot = threading.BoundedSemaphore(1)
@@ -166,6 +179,7 @@ def create_app(settings=None, worker_runner=run_worker):
     @app.get("/v1/capabilities")
     def capabilities():
         return {"extraction_configured": bool(settings.llm_base_url and settings.llm_model),
+                "systemone_configured": bool(settings.systemone_ip and settings.systemone_model),
                 "ocr_available": shutil.which(settings.tesseract_cmd) is not None,
                 "limits": {"upload_bytes": settings.max_upload_bytes, "files": settings.max_files,
                            "pages": settings.max_pages, "pixels_per_page": settings.max_pixels,
@@ -173,6 +187,11 @@ def create_app(settings=None, worker_runner=run_worker):
                 "formats": ["pdf", "png", "jpeg", "tiff", "webp"]}
 
     def handle(mode):
+        if mode == "systemone" and not (settings.systemone_ip and settings.systemone_model):
+            missing = [name for name, value in [("SYSTEMONE_IP", settings.systemone_ip),
+                                               ("SYSTEMONE_MODEL", settings.systemone_model)] if not value]
+            raise ServiceError("systemone_unavailable", "Configure SYSTEMONE_IP and SYSTEMONE_MODEL for decision inference.", 503,
+                               details={"stage": "configuration", "missing_settings": missing})
         if mode == "extract" and not (settings.llm_base_url and settings.llm_model):
             missing = [name for name, value in [("LLM_BASE_URL", settings.llm_base_url), ("LLM_MODEL", settings.llm_model)] if not value]
             raise ServiceError("extraction_unavailable", "Configure LLM_BASE_URL and LLM_MODEL for structured extraction.", 503,
@@ -202,10 +221,11 @@ def create_app(settings=None, worker_runner=run_worker):
                     raise
                 except Exception:
                     debug.emit("logging.capture_failed", g.request_id, stage="api_input")
-            if set(request.files) - {"documents"} or set(request.form) - {"instructions", "schema", "force_ocr"}:
+            allowed_fields = {"questions", "force_ocr"} if mode == "systemone" else {"instructions", "schema", "force_ocr"}
+            if set(request.files) - {"documents"} or set(request.form) - allowed_fields:
                 raise ServiceError("invalid_request", "Unknown request fields.", 400,
                                    details={"stage": "request", "allowed_file_fields": ["documents"],
-                                            "allowed_form_fields": ["instructions", "schema", "force_ocr"]})
+                                            "allowed_form_fields": sorted(allowed_fields)})
             uploads = request.files.getlist("documents")
             if not 1 <= len(uploads) <= settings.max_files:
                 raise ServiceError("invalid_request", f"Supply 1 to {settings.max_files} documents.", 400,
@@ -214,6 +234,18 @@ def create_app(settings=None, worker_runner=run_worker):
                 raise ServiceError("invalid_request", "Duplicate form fields are not allowed.", 400,
                                    details={"stage": "request", "reason": "duplicate_form_fields"})
             instructions = request.form.get("instructions", "")
+            questions = None
+            if mode == "systemone":
+                questions_text = request.form.get("questions", "")
+                if len(questions_text) > 32_000:
+                    raise ServiceError("invalid_request", "Questions exceed the limit.", 400,
+                                       details={"stage": "request", "field": "questions", "maximum": 32_000})
+                try:
+                    questions = load_json(questions_text)
+                except (ValueError, RecursionError):
+                    raise ServiceError("invalid_request", "Supply questions as a JSON object.", 400,
+                                       details={"stage": "request", "field": "questions"}) from None
+                validate_questions(questions)
             schema_text = request.form.get("schema", "{}")
             if len(instructions) > 16_000 or len(schema_text) > 32_000:
                 limits = [{"field": name, "actual": len(value), "maximum": maximum, "unit": "characters"}
@@ -246,6 +278,8 @@ def create_app(settings=None, worker_runner=run_worker):
                                            details={"stage": "upload", "document": index + 1, "bytes": 0})
                     paths.append(str(path))
                 job = {"mode": mode, "files": paths, "instructions": instructions, "schema": schema, "force_ocr": force == "true"}
+                if mode == "systemone":
+                    job["questions"] = questions
                 if debug:
                     job["request_id"] = g.request_id
                 (directory / "job.json").write_text(json.dumps(job), encoding="utf-8")
@@ -256,5 +290,6 @@ def create_app(settings=None, worker_runner=run_worker):
 
     app.add_url_rule("/v1/text", "text", lambda: handle("text"), methods=["POST"])
     app.add_url_rule("/v1/extract", "extract", lambda: handle("extract"), methods=["POST"])
+    app.add_url_rule("/v1/systemone", "systemone", lambda: handle("systemone"), methods=["POST"])
     return app
 

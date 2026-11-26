@@ -87,6 +87,7 @@ Install additional Tesseract language packs in a derived image and set `OCR_LANG
 | `GET /v1/capabilities` | Bearer auth | Configuration flags, formats, limits |
 | `POST /v1/text` | Multipart `documents`, optional `force_ocr` | Page text and warnings; works without a model |
 | `POST /v1/extract` | Multipart `documents`, `instructions`, `schema`, optional `force_ocr` | Schema-validated `data`, page text and warnings |
+| `POST /v1/systemone` | Multipart `documents`, `questions`, optional `force_ocr` | Typed ranker decisions in `data`, page text and warnings |
 
 Repeat the `documents` part for each upload, in the desired document order. Supply
 `schema` as a form **string containing JSON Schema**, not a file upload or example
@@ -127,6 +128,68 @@ references, schema IDs, and dynamic anchors are rejected. For strict provider sc
 use `additionalProperties: false`, make fields required, and allow `null` for unknowns.
 Some format checkers ignore unknown format names. Schema validation checks structure
 and declared supported formats, not truth, evidence quotes, deduplication, or completeness.
+
+### SystemOne / rank-categorizer inference
+
+Configure an independent [rank-categorizer](https://github.com/Jonathan-Paul-Wood/rank-categorizer)
+service in `.env`:
+
+```dotenv
+SYSTEMONE_IP=192.168.1.50
+SYSTEMONE_PORT=8009
+SYSTEMONE_API_KEY=your-ranker-service-key
+SYSTEMONE_MODEL=kev-latest
+```
+
+`SYSTEMONE_IP` accepts an IP address or hostname without a scheme, port, or path.
+The adapter calls `http://SYSTEMONE_IP:SYSTEMONE_PORT/v1/systemone` using bearer
+authentication with `SYSTEMONE_API_KEY`. This is separate from `OCR_API_KEY`, which
+authenticates callers to this processor. An empty ranker key omits upstream auth.
+`SYSTEMONE_MODEL` defaults to `kev-latest`; set it to the ranker's active custom ID
+when needed. Compose passes all four settings to the processor; recreate the container
+after editing them. For local Python runs, export them into the process environment.
+The address must be reachable from the processor container; `localhost` refers to
+that container. This service contract uses HTTP on your private network.
+
+Call `/v1/systemone` with the same document uploads as `/v1/text` and a `questions`
+form string containing a nonempty JSON object. Each question has a `type` of `choice`,
+`score`, or `noul`, optional `instructions` (any JSON value), and criteria appropriate
+to its type. Choice criteria are a map of 1–255 option names to descriptions; score
+criteria are an ordered array of 1–255 levels. Noul returns the probability of true
+and optionally accepts a criteria object. Questions are limited to 32,000 characters;
+the remote service may enforce additional question and token limits.
+
+```sh
+curl --fail-with-body http://127.0.0.1:8081/v1/systemone \
+  -H "Authorization: Bearer $OCR_API_KEY" \
+  -F 'documents=@receipt.png' \
+  -F 'questions=<examples/systemone.questions.json'
+```
+
+The processor reads/OCRs the documents, then sends
+`{"model":"kev-latest","state":{"pages":[...]},"questions":{...}}` to the ranker.
+Original file bytes are never sent. All questions independently evaluate the same
+document state. The response includes `pages`, `warnings`, and `data`, with the
+ranker's `model`, `answers`, and any usage/timing metadata preserved in `data`.
+Answer IDs and types must match the questions; choice answers must name a supplied
+option, and noul/score values must fall within their respective ranges.
+
+This route performs decisions and categorization; it does not generate arbitrary
+fields from a JSON Schema. It accepts neither `schema` nor global `instructions`;
+put decision instructions inside each question. `/v1/extract` continues to use only
+the LLM settings, and `/v1/systemone` works with all `LLM_*` settings empty. Neither
+route falls back to the other provider. `/v1/capabilities` independently reports
+`systemone_configured` and `extraction_configured`; these flags indicate configuration,
+not remote readiness. No provider/model downloads or local inference are added.
+
+The SystemOne call uses the remaining request processing budget (180 seconds by
+default), with the same worker deadline and 1 MiB upstream response limit. There
+are no redirects or automatic retries. Upstream HTTP rejections become sanitized
+502 errors with `provider_http_status`; timeouts return 504. Invalid response
+envelopes or answers return 502 `invalid_inference`. Decisions still need review.
+With debug enabled, `systemone.request`, `systemone.response`, and `systemone.error`
+events capture traffic alongside OCR/API events; the configured ranker key is redacted,
+but document text, questions, and decisions remain visible.
 
 Default limits: 20 MiB **total HTTP request**, five files, 30 total pages, 16 million
 pixels per page, 100,000 extracted text characters, 16,000 instruction characters,

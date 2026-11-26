@@ -1,0 +1,15 @@
+{
+  "category": {
+    "type": "choice",
+    "instructions": "Which category best describes this receipt?",
+    "criteria": {
+      "groceries": "Food and household shopping",
+      "travel": "Transportation and accommodation",
+      "other": "A purchase that does not fit the other categories"
+    }
+  },
+  "needs_review": {
+    "type": "noul",
+    "instructions": "Is the receipt unclear or missing a legible total?"
+  }
+}
