@@ -41,11 +41,15 @@ def transaction_ranker(settings):
             choices = {'record_type': 'transaction', 'currency': 'USD', 'account_id': 'checking',
                        'source_account_id': 'checking', 'destination_account_id': '__unknown__',
                        'category_id': 'food', 'direction': 'outgoing', 'refund': 'no'}
-            fields = request['state']['candidate']['fields']
+            choices['account_id'] = state.get('accounts', {}).get(request['state']['pages'][0]['document'], 'checking')
+            fields = request['state'].get('candidate', {}).get('fields', {})
+            if fields.get('Description') == 'Payment':
+                choices['direction'] = 'incoming'
             if fields.get('Description') == 'Opening balance':
                 choices['record_type'] = 'exclude'
             for name in ('date', 'amount'):
-                choices[name] = next((key for key in request['questions'][name]['criteria'] if key != '__unknown__'), '__unknown__')
+                if name in request['questions']:
+                    choices[name] = next((key for key in request['questions'][name]['criteria'] if key != '__unknown__'), '__unknown__')
             if state.get('amount'):
                 choices['amount'] = state['amount']
             if state['unknown']:
@@ -94,9 +98,14 @@ def test_csv_rows_mirrored_and_summary_preserved_until_decision(transaction_rank
     response = upload(settings, content, 'transactions.csv')
     assert response.status_code == 200, response.json
     rows = response.json['data']['transactions']
-    assert len(rows) == 2 and len(state['requests']) == 3
+    assert len(rows) == 2 and len(state['requests']) == 4
     assert rows[0]['description'] == 'Market, shop'
     assert rows[0]['amount'] == rows[1]['amount'] == '12.34'
+    assert rows[0]['source_account_id'] == 'checking' and rows[0]['destination_account_id'] is None
+    assert rows[1]['source_account_id'] is None and rows[1]['destination_account_id'] == 'checking'
+    assert sum('account_id' in request['questions'] for request in state['requests']) == 1
+    assert all('currency' not in request['questions'] for request in state['requests'])
+    assert all(not {'source_account_id', 'destination_account_id'} & request['questions'].keys() for request in state['requests'])
     assert response.json['pages'][0]['method'] == 'csv'
 
 
@@ -118,6 +127,10 @@ def test_unknown_values_and_schema_validation(transaction_ranker):
     data, warnings = extract_transactions(pages, CONTEXT, validate_schema(SCHEMA), settings, time.monotonic() + 10)
     assert data['transactions'][0]['amount'] is None
     assert data['transactions'][0]['category_id'] is None
+    assert data['transactions'][0]['currency'] == 'USD'
+    assert data['transactions'][0]['account_id'] is None
+    assert data['transactions'][0]['source_account_id'] is None
+    assert data['transactions'][0]['destination_account_id'] is None
     assert warnings
     with pytest.raises(ServiceError, match='output_format'):
         extract_transactions(pages, CONTEXT, validate_schema({'type': 'object', 'required': ['missing']}), settings, time.monotonic() + 10)
@@ -142,7 +155,7 @@ def test_csv_encoding_dates_and_integer_amounts():
     assert set(amounts('JPY 1000')) == {'1000'}
 
 
-@pytest.mark.parametrize('context', [[], {'accounts': [{'id': 'a'}, {'id': 'a'}]}, {'accounts': [None]}, {'categories': [{'id': str(i)} for i in range(255)]}])
+@pytest.mark.parametrize('context', [[], {'accounts': [{'id': 'a'}, {'id': 'a'}]}, {'accounts': [None]}, {'categories': [{'id': str(i)} for i in range(255)]}, {'default_currency': None}, {'default_currency': 'usd'}])
 def test_invalid_context_rejected(context):
     with pytest.raises(ServiceError):
         validate_context(context)
@@ -182,4 +195,24 @@ def test_systemone_timeout_uses_call_limit_and_remaining_batch_budget(transactio
     for remaining in (1800, 10):
         extract_transactions(pages, CONTEXT, validate_schema(SCHEMA), settings, time.monotonic() + remaining)
     assert timeouts[0] == 600
-    assert 0 < timeouts[1] <= 10
+    assert timeouts[1] == 600
+    assert all(0 < value <= 10 for value in timeouts[2:])
+
+
+def test_account_selected_once_across_pages_and_separately_per_document(transaction_ranker):
+    settings, state = transaction_ranker
+    state['accounts'] = {1: 'checking', 2: 'savings'}
+    context = {**CONTEXT, 'default_currency': 'CAD',
+               'accounts': CONTEXT['accounts'] + [{'id': 'savings', 'name': 'Savings', 'currency': 'EUR'}]}
+    pages = [{'document': document, 'page': page, 'method': 'embedded',
+              'text': '2026-11-15 Market EUR 12.34'} for document, page in [(1, 1), (2, 1), (1, 2)]]
+    data, _ = extract_transactions(pages, context, validate_schema(SCHEMA), settings, time.monotonic() + 10)
+    rows = data['transactions']
+    assert [row['account_id'] for row in rows] == ['checking', 'savings', 'checking']
+    assert [row['source_account_id'] for row in rows] == ['checking', 'savings', 'checking']
+    assert all(row['currency'] == 'CAD' and row['destination_account_id'] is None for row in rows)
+    account_requests = [request for request in state['requests'] if 'account_id' in request['questions']]
+    assert len(account_requests) == 2
+    assert [page['page'] for page in account_requests[0]['state']['pages']] == [1, 2]
+    assert all(set(request['questions']) == {'account_id'} for request in account_requests)
+    assert all('currency' not in request['questions'] for request in state['requests'])

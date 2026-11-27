@@ -136,14 +136,18 @@ and declared supported formats, not truth, evidence quotes, deduplication, or co
 `POST /v1/transactions` accepts `documents`, JSON `context` and `output_format` as
 JSON Schema draft 2020-12. Context contains `accounts` (IDs, names, descriptions,
 numbers, types/classes, currencies), `categories` (IDs, names, descriptions), enabled
-`rules`, and `currencies` (codes/precision). Context is limited to 64,000 characters;
+`rules`, `currencies` (codes/precision), and `default_currency` (defaults to `USD`).
+All extracted transactions use the default currency without asking Kev to check it.
+Context is limited to 64,000 characters;
 accounts and categories each allow at most 254 entries plus an unknown choice.
 
 Each CSV record is a candidate. Dated text rows and their continuation lines form
 statement candidates; a page without multiple dated rows is a receipt/page candidate.
-Kev receives each candidate with its document text and caller context, and answers
-choice questions for posted status, date, amount, currency, own/source/destination
-accounts, category, direction and refund. Dates/amounts are restricted to observed
+Kev identifies the own account once per document using all its pages. Each candidate
+then uses that account and answers choice questions for posted status, date, amount,
+category, direction and refund. The document account becomes the source for outflows
+and destination for inflows; the other side remains null for the caller to resolve.
+An unknown direction leaves both sides null. Dates/amounts are restricted to observed
 candidates; ambiguous values can remain null. Receipt items are kept together and Kev
 selects the final paid total. Summary/pending entries can be excluded by Kev.
 
