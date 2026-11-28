@@ -38,23 +38,26 @@ def transaction_ranker(settings):
         def do_POST(self):
             request = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
             state['requests'].append(request)
-            choices = {'record_type': 'transaction', 'currency': 'USD', 'account_id': 'checking',
-                       'source_account_id': 'checking', 'destination_account_id': '__unknown__',
-                       'category_id': 'food', 'direction': 'outgoing', 'refund': 'no'}
-            choices['account_id'] = state.get('accounts', {}).get(request['state']['pages'][0]['document'], 'checking')
-            fields = request['state'].get('candidate', {}).get('fields', {})
-            if fields.get('Description') == 'Payment':
-                choices['direction'] = 'incoming'
-            if fields.get('Description') == 'Opening balance':
-                choices['record_type'] = 'exclude'
-            for name in ('date', 'amount'):
-                if name in request['questions']:
-                    choices[name] = next((key for key in request['questions'][name]['criteria'] if key != '__unknown__'), '__unknown__')
-            if state.get('amount'):
-                choices['amount'] = state['amount']
-            if state['unknown']:
-                choices = {key: '__unknown__' for key in request['questions']}
-            response = {'model': 'kev-test', 'answers': {key: {'type': 'choice', 'choice': choices[key]} for key in request['questions']}}
+            answers = {}
+            candidates = {value['id']: value for value in request['state'].get('candidates', [])}
+            if state.get('reject_batches') and len(candidates) > 1:
+                self.send_response(413)
+                self.end_headers()
+                return
+            for key, question in request['questions'].items():
+                prefix, _, name = key.rpartition('.')
+                name = name or key
+                fields = candidates.get(prefix, {}).get('fields', {})
+                choices = {'record_type': 'exclude' if fields.get('Description') == 'Opening balance' else 'transaction',
+                           'account_id': state.get('accounts', {}).get(request['state']['pages'][0]['document'], 'checking'),
+                           'category_id': 'food', 'direction': 'incoming' if fields.get('Description') == 'Payment' else 'outgoing', 'refund': 'no'}
+                value = choices.get(name)
+                if name in ('date', 'amount'):
+                    value = next((choice for choice in question['criteria'] if choice != '__unknown__'), '__unknown__')
+                if name == 'amount' and state.get('amount'):
+                    value = state['amount']
+                answers[key] = {'type': 'choice', 'choice': '__unknown__' if state['unknown'] else value}
+            response = {'model': 'kev-test', 'answers': answers}
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
@@ -98,7 +101,7 @@ def test_csv_rows_mirrored_and_summary_preserved_until_decision(transaction_rank
     response = upload(settings, content, 'transactions.csv')
     assert response.status_code == 200, response.json
     rows = response.json['data']['transactions']
-    assert len(rows) == 2 and len(state['requests']) == 4
+    assert len(rows) == 2 and len(state['requests']) == 2
     assert rows[0]['description'] == 'Market, shop'
     assert rows[0]['amount'] == rows[1]['amount'] == '12.34'
     assert rows[0]['source_account_id'] == 'checking' and rows[0]['destination_account_id'] is None
@@ -183,14 +186,14 @@ def test_extended_timeouts_are_configurable(monkeypatch):
 def test_systemone_timeout_uses_call_limit_and_remaining_batch_budget(transaction_ranker, monkeypatch):
     import httpx
     settings, _ = transaction_ranker
-    client = httpx.Client
+    stream = httpx.Client.stream
     timeouts = []
 
-    def capture(**kwargs):
+    def capture(self, *args, **kwargs):
         timeouts.append(kwargs['timeout'])
-        return client(**kwargs)
+        return stream(self, *args, **kwargs)
 
-    monkeypatch.setattr('ocr_processor.systemone.httpx.Client', capture)
+    monkeypatch.setattr(httpx.Client, 'stream', capture)
     pages = [{'document': 1, 'page': 1, 'method': 'embedded', 'text': '2026-11-15 Market USD 12.34'}]
     for remaining in (1800, 10):
         extract_transactions(pages, CONTEXT, validate_schema(SCHEMA), settings, time.monotonic() + remaining)
@@ -208,11 +211,22 @@ def test_account_selected_once_across_pages_and_separately_per_document(transact
               'text': '2026-11-15 Market EUR 12.34'} for document, page in [(1, 1), (2, 1), (1, 2)]]
     data, _ = extract_transactions(pages, context, validate_schema(SCHEMA), settings, time.monotonic() + 10)
     rows = data['transactions']
-    assert [row['account_id'] for row in rows] == ['checking', 'savings', 'checking']
-    assert [row['source_account_id'] for row in rows] == ['checking', 'savings', 'checking']
+    assert [row['account_id'] for row in rows] == ['checking', 'checking', 'savings']
+    assert [row['source_account_id'] for row in rows] == ['checking', 'checking', 'savings']
     assert all(row['currency'] == 'CAD' and row['destination_account_id'] is None for row in rows)
     account_requests = [request for request in state['requests'] if 'account_id' in request['questions']]
     assert len(account_requests) == 2
     assert [page['page'] for page in account_requests[0]['state']['pages']] == [1, 2]
     assert all(set(request['questions']) == {'account_id'} for request in account_requests)
     assert all('currency' not in request['questions'] for request in state['requests'])
+
+
+def test_batch_limit_falls_back_without_losing_candidates(transaction_ranker):
+    settings, state = transaction_ranker
+    state['reject_batches'] = True
+    response = upload(settings, b'Date,Description,Amount\n2026-11-15,Market,12.34\n2026-11-16,Payment,25.00\n', 'rows.csv')
+    assert response.status_code == 200, response.json
+    rows = response.json['data']['transactions']
+    assert [row['amount'] for row in rows] == ['12.34', '25.00']
+    assert [row['direction'] for row in rows] == ['outgoing', 'incoming']
+    assert len(state['requests']) == 4  # account, rejected batch, two singles

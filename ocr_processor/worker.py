@@ -18,12 +18,26 @@ from .transactions import extract_transactions
 def process(job, directory, settings):
     debug = WorkerDebugLog(settings, job.get("request_id")) if settings.debug_mode else None
     deadline = time.monotonic() + settings.timeout
+    def progress(status, completed=0, total=None):
+        target = Path(directory) / 'progress.json'
+        temporary = target.with_suffix('.tmp')
+        temporary.write_text(json.dumps(dict(status=status, completed=completed, total=total)), encoding='utf-8')
+        # Windows readers may briefly prevent replacement of an open destination.
+        # Progress is advisory; a status poll must never fail the extraction.
+        for attempt in range(20):
+            try:
+                os.replace(temporary, target)
+                break
+            except PermissionError:
+                if os.name != 'nt':
+                    raise
+                time.sleep(0.005)
     if job["mode"] == "systemone":
         validate_questions(job["questions"])
     with error_context(stage="schema_validation"):
         validator = validate_schema(job["schema"]) if job["mode"] in {"extract", "transactions"} else None
     with error_context(stage="document_read"):
-        pages, warnings = read_documents(job["files"], directory, settings, deadline, job["force_ocr"])
+        pages, warnings = read_documents(job["files"], directory, settings, deadline, job["force_ocr"], progress=progress)
     result = {"pages": pages, "warnings": warnings}
     if job["mode"] == "systemone":
         with error_context(stage="systemone_inference"):
@@ -31,7 +45,7 @@ def process(job, directory, settings):
         result["warnings"].append("Machine decisions require review; confidence does not establish factual accuracy.")
     if job["mode"] == "transactions":
         result["data"], transaction_warnings = extract_transactions(
-            pages, job["context"], validator, settings, deadline, debug_log=debug)
+            pages, job["context"], validator, settings, deadline, debug_log=debug, progress=progress)
         result["warnings"].extend(transaction_warnings)
     if job["mode"] == "extract":
         with error_context(stage="model_extraction"):

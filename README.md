@@ -172,6 +172,39 @@ application/proxies allow 1,900 seconds. Existing `.env` overrides retain their 
 update them when deploying. Increasing the batch budget further also requires updating
 Hoard Counter/proxy limits. Large or slow batches may still need splitting.
 
+### Background transaction jobs
+
+Hoard Counter uses `POST /v1/transaction-jobs` for background imports. Send multipart
+`documents`, JSON `manifest` (one `{job_id, filename}` per file), `context`, and
+`output_format`; `job_id` is the SHA-256 of the original bytes. The response is
+`202` with `submission_id`, `service_instance_id`, and per-file `run_id` references.
+Matching file/context/schema/model/version inputs reuse an active or completed run.
+
+`GET /v1/transaction-jobs/{submission_id}` returns per-file `status`, `state`,
+`completed`, `total`, errors, and aggregate `ready`. Statuses are `processing_file`,
+`extracting_transactions`, `identifying_accounts`, `determining_categories`, and
+`completed`; lifecycle states are `queued`, `running`, `succeeded`, and `failed`.
+Unknown totals are null. Failed files retain their last processing stage.
+
+`GET /v1/transaction-jobs/{submission_id}/result` returns `202` while unfinished,
+or one aggregate `{files: [{job_id, run_id, result, error}], ...status}` after all
+files are terminal. Each successful `result` has the existing `pages`, `warnings`,
+and `data.transactions` shape, with document numbering local to that file.
+The caller must save results before `POST /v1/transaction-jobs/{submission_id}/ack`.
+Acknowledgment is idempotent and releases job data once all attached submissions
+have acknowledged. The original synchronous `/v1/transactions` remains supported.
+
+Jobs run outside the HTTP request in a single processing queue shared with the
+synchronous extraction slot. Restart loses queued/running/unacknowledged jobs.
+Authenticated job requests also clean records older than 24 hours from creation;
+polling does not renew retention. Inputs and results are otherwise retained until
+acknowledgment. No durable-restart recovery or public callback is required.
+
+`TRANSACTION_BATCH_SIZE` defaults to 10 (bounded to 1–50). Every candidate has its
+own six namespaced choice questions, while pages/context appear once per batch.
+Explicit input-limit errors or invalid responses split batches down to singles.
+Timeout and authentication failures fail the file rather than multiplying calls.
+
 ### SystemOne / rank-categorizer inference
 
 Configure an independent [rank-categorizer](https://github.com/Jonathan-Paul-Wood/rank-categorizer)

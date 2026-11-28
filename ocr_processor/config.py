@@ -25,6 +25,7 @@ class Settings:
     systemone_port: int = 8009
     systemone_api_key: str = ""
     systemone_model: str = "kev-latest"
+    transaction_batch_size: int = 10
 
     @property
     def systemone_base_url(self):
@@ -42,6 +43,7 @@ class Settings:
             systemone_port=int(os.getenv("SYSTEMONE_PORT", "8009")),
             systemone_api_key=os.getenv("SYSTEMONE_API_KEY", ""),
             systemone_model=os.getenv("SYSTEMONE_MODEL", "kev-latest"),
+            transaction_batch_size=int(os.getenv("TRANSACTION_BATCH_SIZE", "10")),
             timeout=int(os.getenv("REQUEST_TIMEOUT_SECONDS", "1800")),
             systemone_timeout=int(os.getenv("SYSTEMONE_TIMEOUT_SECONDS", "600")),
             ocr_timeout=int(os.getenv("OCR_TIMEOUT_SECONDS", "120")),

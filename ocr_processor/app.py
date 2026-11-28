@@ -23,7 +23,7 @@ from .schema import load_json
 from .systemone import validate_questions
 
 
-def run_worker(directory, settings):
+def run_worker(directory, settings, cancelled=None):
     debug = current_app.extensions.get("traffic_debug") if has_app_context() and settings.debug_mode else None
     request_id = g.request_id if has_request_context() else None
     options = {"start_new_session": True} if os.name != "nt" else {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
@@ -39,7 +39,14 @@ def run_worker(directory, settings):
                                   name="traffic-worker-reader", daemon=True)
         reader.start()
     try:
-        process.wait(timeout=settings.timeout + 5)
+        end = time.monotonic() + settings.timeout + 5
+        while process.poll() is None:
+            if (cancelled is not None and cancelled.is_set()) or time.monotonic() >= end:
+                raise subprocess.TimeoutExpired(process.args, settings.timeout + 5)
+            try:
+                process.wait(timeout=min(0.5, max(0.01, end - time.monotonic())))
+            except subprocess.TimeoutExpired:
+                continue
     except subprocess.TimeoutExpired:
         if os.name == "nt":
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -100,8 +107,19 @@ def create_app(settings=None, worker_runner=run_worker):
     debug = DebugLog(settings.debug_log_dir or os.path.join(tempfile.gettempdir(), "ocr-processor-debug"),
                      (settings.api_key, settings.llm_api_key, settings.systemone_api_key)) if settings.debug_mode else None
     app.extensions["traffic_debug"] = debug
-    app.config.update(MAX_CONTENT_LENGTH=settings.max_upload_bytes, MAX_FORM_MEMORY_SIZE=512 * 1024, MAX_FORM_PARTS=12)
     slot = threading.BoundedSemaphore(1)
+    def background_worker(directory, cancelled):
+        while not cancelled.is_set():
+            if slot.acquire(timeout=0.5):
+                try:
+                    return run_worker(directory, settings, cancelled)
+                finally:
+                    slot.release()
+        raise ServiceError('job_expired', 'Import job expired.', 410)
+    from .jobs import JobStore, register_jobs
+    jobs = JobStore(settings, background_worker)
+    app.extensions['transaction_jobs'] = jobs
+    app.config.update(MAX_CONTENT_LENGTH=settings.max_upload_bytes, MAX_FORM_MEMORY_SIZE=512 * 1024, MAX_FORM_PARTS=12)
 
     @app.before_request
     def authorize():
@@ -120,6 +138,8 @@ def create_app(settings=None, worker_runner=run_worker):
             if not hmac.compare_digest(request.headers.get("Authorization", "").encode(), expected.encode()):
                 raise ServiceError("unauthorized", "A valid bearer API key is required.", 401,
                                    details={"stage": "authentication", "hint": "Send Authorization: Bearer with the configured OCR_API_KEY."})
+
+    register_jobs(app, jobs, settings)
 
     @app.after_request
     def headers(response):
@@ -179,6 +199,9 @@ def create_app(settings=None, worker_runner=run_worker):
     @app.get("/v1/capabilities")
     def capabilities():
         return {"extraction_configured": bool(settings.llm_base_url and settings.llm_model),
+                "transaction_jobs_configured": bool(settings.systemone_ip and settings.systemone_model),
+                "transaction_model": settings.systemone_model,
+                "transaction_extraction_version": 'transactions-batched-v1',
                 "systemone_configured": bool(settings.systemone_ip and settings.systemone_model),
                 "transaction_extraction_configured": bool(settings.systemone_ip and settings.systemone_model),
                 "ocr_available": shutil.which(settings.tesseract_cmd) is not None,

@@ -63,7 +63,7 @@ def _valid_response(data, questions):
     return True
 
 
-def infer(pages, questions, settings, deadline, debug_log=None, state=None):
+def infer(pages, questions, settings, deadline, debug_log=None, state=None, client=None):
     url = settings.systemone_base_url + "/v1/systemone"
     body = {"model": settings.systemone_model, "state": state if state is not None else {"pages": pages}, "questions": questions}
     headers = {"Authorization": f"Bearer {settings.systemone_api_key}"} if settings.systemone_api_key else {}
@@ -82,8 +82,9 @@ def infer(pages, questions, settings, deadline, debug_log=None, state=None):
 
     log("request", method="POST", url=url, headers=headers, body=body, timeout_seconds=round(remaining, 3))
     try:
-        with httpx.Client(timeout=remaining, trust_env=False) as client:
-            with client.stream("POST", url, headers=headers, json=body) as response:
+        from contextlib import nullcontext
+        with (nullcontext(client) if client is not None else httpx.Client(timeout=remaining, trust_env=False)) as connection:
+            with connection.stream("POST", url, headers=headers, json=body, timeout=remaining) as response:
                 raw = bytearray()
                 for chunk in response.iter_bytes():
                     raw.extend(chunk)

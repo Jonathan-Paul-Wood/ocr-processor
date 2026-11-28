@@ -55,7 +55,7 @@ def recognize(image, directory, settings, deadline):
         return output.with_suffix(".txt").read_text(encoding="utf-8").strip()
 
 
-def read_documents(files, directory, settings, deadline, force_ocr=False):
+def read_documents(files, directory, settings, deadline, force_ocr=False, progress=None):
     pages = []
     chars = 0
     warnings_list = []
@@ -70,8 +70,12 @@ def read_documents(files, directory, settings, deadline, force_ocr=False):
             raise ServiceError("text_limit", "Extracted text exceeds the limit; split the documents.", 413,
                                details={"limit": "text_characters", "actual": chars, "maximum": settings.max_text_chars})
         pages.append({"document": document, "page": number, "method": method, "text": text})
+        if progress:
+            progress('processing_file', len(pages), total_pages[0])
         if not text.strip():
             warnings_list.append(f"Document {document}, page {number} contains no readable text.")
+
+    total_pages = [None]
 
     def read_file(index, filename):
         path = Path(filename)
@@ -79,6 +83,7 @@ def read_documents(files, directory, settings, deadline, force_ocr=False):
         rows = csv_rows(path.read_bytes())
         if rows is not None:
             import json
+            total_pages[0] = 1 if len(files) == 1 else None
             append(index, 1, json.dumps(rows, ensure_ascii=False), "csv")
             return
         with path.open("rb") as source:
@@ -86,6 +91,9 @@ def read_documents(files, directory, settings, deadline, force_ocr=False):
         if signature == b"%PDF-":
             try:
                 with pdfium.PdfDocument(path) as pdf:
+                    total_pages[0] = len(pdf) if len(files) == 1 else None
+                    if progress:
+                        progress('processing_file', len(pages), total_pages[0])
                     if len(pdf) == 0:
                         raise ServiceError("invalid_document", "PDF has no pages.", details={"reason": "empty_pdf", "pages": 0})
                     if len(pdf) + len(pages) > settings.max_pages:
@@ -136,6 +144,9 @@ def read_documents(files, directory, settings, deadline, force_ocr=False):
                             raise ServiceError("unsupported_document", "Use PDF, PNG, JPEG, TIFF, or WebP.", 415,
                                                details={"stage": "image_open", "detected_format": image.format})
                         frames = getattr(image, "n_frames", 1)
+                        total_pages[0] = frames if len(files) == 1 else None
+                        if progress:
+                            progress('processing_file', len(pages), total_pages[0])
                         if frames + len(pages) > settings.max_pages:
                             raise ServiceError("page_limit", "Combined page count exceeds the limit.", 413,
                                                details={"limit": "pages", "actual": frames + len(pages), "maximum": settings.max_pages,
